@@ -13,7 +13,6 @@ import requests
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-import websockets
 
 
 # --- Configuration ---
@@ -42,7 +41,6 @@ app.add_middleware(
 )
 
 response_sockets: Dict[str, WebSocket] = {}
-
 
 def is_sentence_complete(text: str) -> bool:
     return bool(re.search(r"[.!?]$", text.strip()))
@@ -152,51 +150,67 @@ async def stream_lyzr_response(text: str):
 
 # ----------------- ELEVENLABS STREAM -----------------
 async def stream_to_elevenlabs(text: str):
-    uri = f"wss://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}/stream-input?output_format=mp3_44100_32"
-    headers = {
-        "xi-api-key": ELEVENLABS_API_KEY,
-        "accept": "application/json",
-        "Content-Type": "application/json",
-    }
-
-    logger.info("[stream_elevenlabs_audio] Connecting to ElevenLabs...")
-
     try:
-        # Connect to ElevenLabs WebSocket
-        async with connect(uri, extra_headers=headers) as ws:
-            # Send the initial request to start TTS
-            await ws.send(json.dumps({
+        logger.info(f"🎧 Sending to ElevenLabs: {text}")
+        response = requests.post(
+            f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}/stream",
+            headers={
+                "xi-api-key": ELEVENLABS_API_KEY,
+                "Content-Type": "application/json"
+            },
+            json={
                 "text": text,
                 "voice_settings": {
                     "stability": 0.5,
-                    "similarity_boost": 0.75
+                    "similarity_boost": 0.8
                 },
-                "model_id": "eleven_multilingual_v2"
-            }))
-            logger.info("[stream_elevenlabs_audio] Sent synthesis request.")
+                "output_format": "webm_opus"
+            },
+            stream=True
+        )
 
-            # Handle receiving audio chunks
-            while True:
-                chunk = await ws.recv()
-                if isinstance(chunk, bytes):
-                    # Send the audio chunk to the frontend if the audio client is available
-                    if audio_client:
-                        await audio_client.send_bytes(chunk)
-                        logger.debug("[stream_elevenlabs_audio] Sent audio chunk to frontend.")
-                    else:
-                        logger.warning("[stream_elevenlabs_audio] No active audio client.")
-                elif isinstance(chunk, str):
-                    # If the chunk is a string, parse it as JSON
-                    data = json.loads(chunk)
-                    if data.get("event") == "end_of_stream":
-                        logger.info("[stream_elevenlabs_audio] Received end_of_stream.")
+        if response.status_code == 200:
+            ws = next(iter(response_sockets.values()), None)
+            if ws:
+                logger.info("📡 Streaming audio to frontend")
+
+                ffmpeg_process = subprocess.Popen(
+                    [
+                        "ffmpeg", "-hide_banner", "-loglevel", "error",
+                        "-i", "pipe:0",
+                        "-f", "webm", "-c:a", "libopus", "-b:a", "64k", "pipe:1"
+                    ],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                )
+
+                for chunk in response.iter_content(chunk_size=1024):
+                    if chunk and ffmpeg_process.stdin:
+                        try:
+                            ffmpeg_process.stdin.write(chunk)
+                            ffmpeg_process.stdin.flush()
+                        except BrokenPipeError:
+                            break
+
+                if ffmpeg_process.stdin:
+                    ffmpeg_process.stdin.close()
+
+                while True:
+                    data = ffmpeg_process.stdout.read(1024)
+                    if not data:
                         break
+                    await ws.send_bytes(data)
 
+                ffmpeg_process.wait()
+
+                logger.info(f"✅ Sent audio to frontend")
+
+            else:
+                logger.warning("⚠️ No active WebSocket to send audio")
+        else:
+            logger.error(f"❌ ElevenLabs error: {response.status_code} {response.text}")
     except Exception as e:
-        logger.error(f"[stream_elevenlabs_audio] Error: {e}")
-
-
-
+        logger.error(f"❌ Error streaming from ElevenLabs: {e}")
 
 
 @app.websocket("/ws/send_text")
