@@ -1578,7 +1578,6 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 # --- Configuration ---
-openai.api_key = "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"  # Add your OpenAI API Key here
 
 # --- Init ---
 app = FastAPI()
