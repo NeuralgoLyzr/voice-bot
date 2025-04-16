@@ -1783,6 +1783,18 @@ async def transcribe_audio_with_openai(audio: bytes) -> str:
         logger.error(f"❌ Error during transcription: {e}")
         return None
 
+@app.websocket("/ws/send_text")
+async def send_text(websocket: WebSocket):
+    await websocket.accept()
+    logger.info("📝 Text WebSocket connected")
+    try:
+        while True:
+            message = await websocket.receive_text()
+            logger.info(f"📨 Received text from frontend: {message}")
+            await stream_lyzr_response(message)
+    except WebSocketDisconnect:
+        logger.info("🔌 Text WebSocket disconnected")
+
 # ----------------- WS: AUDIO OUTPUT -----------------
 @app.websocket("/ws/receive_audio")
 async def receive_audio_ws(websocket: WebSocket):
